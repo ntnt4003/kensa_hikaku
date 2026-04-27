@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>検査規格_変更前後比較ツール</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Meiryo","Yu Gothic",sans-serif;background:#f0f4f8;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:32px 16px}
+h1{font-size:1.3rem;color:#1e3a5f;margin-bottom:24px}
+.card{background:#fff;border-radius:12px;box-shadow:0 2px 12px #0001;padding:28px 32px;width:100%;max-width:560px}
+.upload-area{border:2px dashed #90afd4;border-radius:8px;padding:20px;text-align:center;cursor:pointer;transition:background .2s;margin-bottom:16px}
+.upload-area:hover,.upload-area.drag-over{background:#eef4fb}
+.upload-area.drag-over{border-color:#2e5aa8;background:#ddeeff}
+.upload-area input{display:none}
+.label{font-size:.95rem;color:#4a6fa5;font-weight:bold}
+.sub{font-size:.8rem;color:#888;margin-top:4px}
+.file-name{font-size:.85rem;color:#2d6a2d;margin-top:6px;font-weight:bold}
+.key-info{background:#f7f9fc;border-left:4px solid #4472c4;padding:10px 14px;border-radius:4px;font-size:.78rem;color:#555;margin-top:20px;line-height:1.6}
+button{width:100%;padding:12px;border:none;border-radius:8px;font-size:1rem;font-weight:bold;cursor:pointer;transition:background .2s;margin-top:8px}
+#runBtn{background:#4472c4;color:#fff}
+#runBtn:hover:not(:disabled){background:#2e5aa8}
+#runBtn:disabled{background:#aaa;cursor:not-allowed}
+#dbgBtn{background:#e8f0fe;color:#1e3a5f;border:1px solid #4472c4;font-size:.9rem}
+#log{margin-top:18px;font-size:.85rem;color:#555;min-height:24px}
+pre#dbg{margin-top:12px;background:#f7f9fc;border:1px solid #ddd;border-radius:6px;padding:12px;font-size:.75rem;white-space:pre-wrap;word-break:break-all;display:none;max-height:300px;overflow:auto}
+.legend{margin-top:20px}
+.legend-title{font-size:.85rem;font-weight:bold;color:#333;margin-bottom:8px}
+.legend-item{display:flex;align-items:center;gap:10px;font-size:.82rem;color:#444;margin-bottom:5px}
+.dot{width:18px;height:18px;border-radius:3px;flex-shrink:0;border:1px solid #ccc}
+.dot-red{background:#FF9999}.dot-yellow{background:#FFFF99}.dot-gray{background:#CCCCCC}
+</style>
+</head>
+<body>
+<h1>📋 検査規格_変更前後比較ツール</h1>
+<div class="card">
+
+  <div class="upload-area" id="drop_before"
+       onclick="document.getElementById('f_before').click()"
+       ondragover="event.preventDefault();this.classList.add('drag-over')"
+       ondragleave="this.classList.remove('drag-over')"
+       ondrop="handleDrop(event,'before')">
+    <input type="file" id="f_before" accept=".csv,.xlsx,.xls">
+    <div class="label">📂 変更前ファイルを選択</div>
+    <div class="sub">クリックまたはファイルをドラッグ＆ドロップ</div>
+    <div class="file-name" id="name_before">未選択</div>
+  </div>
+  <div class="upload-area" id="drop_after"
+       onclick="document.getElementById('f_after').click()"
+       ondragover="event.preventDefault();this.classList.add('drag-over')"
+       ondragleave="this.classList.remove('drag-over')"
+       ondrop="handleDrop(event,'after')">
+    <input type="file" id="f_after" accept=".csv,.xlsx,.xls">
+    <div class="label">📂 変更後ファイルを選択</div>
+    <div class="sub">クリックまたはファイルをドラッグ＆ドロップ</div>
+    <div class="file-name" id="name_after">未選択</div>
+  </div>
+  <button id="runBtn" disabled onclick="run()">▶ 比較してExcelを出力</button>
+  <button id="dbgBtn" disabled onclick="debugInfo()">🔍 読み込み内容を確認</button>
+  <div id="log"></div>
+  <pre id="dbg"></pre>
+  <div class="legend">
+    <div class="legend-title">【色凡例】</div>
+    <div class="legend-item"><div class="dot dot-gray"></div>ｸﾞﾚｰ(行全体)：削除項目</div>
+    <div class="legend-item"><div class="dot dot-red"></div>赤(行全体)　：新規追加項目</div>
+    <div class="legend-item"><div class="dot dot-red"></div>赤(ｾﾙ)　　　：変更項目(検査項目･規格)</div>
+    <div class="legend-item"><div class="dot dot-yellow"></div>黄(ｾﾙ)　　　：変更項目(その他)</div>
+  </div>
+  <div class="key-info">
+    マッチング: ①完全一致 → ②検査項目＋AI検査方法 → ③全行グレー/赤比較<br>
+    出力順: No列で並び替え　／　比較除外: No・O列
+  </div>
+</div>
+<script>
+(function(){
+
+// ══════════════════════════════════════════════════
+// 定数
+// ══════════════════════════════════════════════════
+var KEY_COLS        = ["検査項目","規格"];
+var IGNORE_COL      = "No";
+var SKIP_COMPARE_IDX= 14;
+var MATCH_KEY_COLS  = ["検査項目","検査方法_2"];
+var FONT_NAME       = "BIZ UDPゴシック";
+
+// 列幅定義（0始まりインデックス）: undefinedの列は自動幅
+var COL_WIDTHS = {
+  0:3.5, 1:3.5, 2:3.5, 3:3.5, 4:3.5, 5:3.5, // A~F
+  6:20,   // G
+          // H: 自動
+  8:47,   // I
+  9:20,   // J
+  10:10,  // K
+  11:22,  // L
+  12:15   // M
+          // N,O: 自動
+};
+
+var dataBefore=null, dataAfter=null;
+var colsBefore=[],   colsAfter=[];
+
+// ══════════════════════════════════════════════════
+// UI
+// ══════════════════════════════════════════════════
+function setLog(m){ document.getElementById("log").textContent=m; }
+function checkReady(){
+  document.getElementById("runBtn").disabled=!(dataBefore&&dataAfter);
+  document.getElementById("dbgBtn").disabled=!(dataBefore||dataAfter);
+}
+
+// ══════════════════════════════════════════════════
+// 文字変換
+// ══════════════════════════════════════════════════
+var ZEN2HAN={
+  'ア':'ｱ','イ':'ｲ','ウ':'ｳ','エ':'ｴ','オ':'ｵ','カ':'ｶ','キ':'ｷ','ク':'ｸ','ケ':'ｹ','コ':'ｺ',
+  'サ':'ｻ','シ':'ｼ','ス':'ｽ','セ':'ｾ','ソ':'ｿ','タ':'ﾀ','チ':'ﾁ','ツ':'ﾂ','テ':'ﾃ','ト':'ﾄ',
+  'ナ':'ﾅ','ニ':'ﾆ','ヌ':'ﾇ','ネ':'ﾈ','ノ':'ﾉ','ハ':'ﾊ','ヒ':'ﾋ','フ':'ﾌ','ヘ':'ﾍ','ホ':'ﾎ',
+  'マ':'ﾏ','ミ':'ﾐ','ム':'ﾑ','メ':'ﾒ','モ':'ﾓ','ヤ':'ﾔ','ユ':'ﾕ','ヨ':'ﾖ',
+  'ラ':'ﾗ','リ':'ﾘ','ル':'ﾙ','レ':'ﾚ','ロ':'ﾛ','ワ':'ﾜ','ヲ':'ｦ','ン':'ﾝ',
+  'ァ':'ｧ','ィ':'ｨ','ゥ':'ｩ','ェ':'ｪ','ォ':'ｫ','ッ':'ｯ','ャ':'ｬ','ュ':'ｭ','ョ':'ｮ',
+  'ガ':'ｶﾞ','ギ':'ｷﾞ','グ':'ｸﾞ','ゲ':'ｹﾞ','ゴ':'ｺﾞ','ザ':'ｻﾞ','ジ':'ｼﾞ','ズ':'ｽﾞ','ゼ':'ｾﾞ','ゾ':'ｿﾞ',
+  'ダ':'ﾀﾞ','ヂ':'ﾁﾞ','ヅ':'ﾂﾞ','デ':'ﾃﾞ','ド':'ﾄﾞ','バ':'ﾊﾞ','ビ':'ﾋﾞ','ブ':'ﾌﾞ','ベ':'ﾍﾞ','ボ':'ﾎﾞ',
+  'パ':'ﾊﾟ','ピ':'ﾋﾟ','プ':'ﾌﾟ','ペ':'ﾍﾟ','ポ':'ﾎﾟ','ヴ':'ｳﾞ','ー':'ｰ',
+  '。':'｡','「':'｢','」':'｣','、':'､','・':'･'
+};
+
+function cleanVal(v){
+  var s=String(v==null?"":v).trim().replace(/=/g,"");
+  s=s.replace(/[Ａ-Ｚａ-ｚ０-９]/g,function(c){return String.fromCharCode(c.charCodeAt(0)-0xFEE0);});
+  s=s.replace(/[ァ-ヶーｦ-ﾟ。「」、・]/g,function(c){return ZEN2HAN[c]||c;});
+  s=s.replace(/．/g,".").replace(/（/g,"(").replace(/）/g,")").replace(/／/g,"/");
+  s=s.replace(/　/g," ");
+  s=s.replace(/：/g,":").replace(/；/g,";").replace(/！/g,"!").replace(/？/g,"?");
+  s=s.replace(/＋/g,"+").replace(/－/g,"-").replace(/×/g,"x").replace(/＊/g,"*");
+  s=s.replace(/＃/g,"#").replace(/＠/g,"@").replace(/￥/g,"\\").replace(/＆/g,"&").replace(/％/g,"%");
+  s=s.replace(/＜/g,"<").replace(/＞/g,">");
+  s=s.replace(/｛/g,"{").replace(/｝/g,"}").replace(/［/g,"[").replace(/］/g,"]");
+  s=s.replace(/〜/g,"~").replace(/‐/g,"-").replace(/―/g,"-");
+  s=s.replace(/｜/g," ").replace(/\|/g," ");
+  return s;
+}
+
+function toNum(s){
+  var n=String(s||"").trim().replace(/[０-９]/g,function(c){return String.fromCharCode(c.charCodeAt(0)-0xFEE0);});
+  return parseFloat(n)||0;
+}
+
+function getColWidth(ci,col,rows){
+  if(COL_WIDTHS[ci]!==undefined) return COL_WIDTHS[ci];
+  var max=col.length;
+  if(rows) rows.forEach(function(r){max=Math.max(max,String(r[col]||"").length);});
+  return Math.min(max+2,60);
+}
+
+// ══════════════════════════════════════════════════
+// CSV パーサー
+// ══════════════════════════════════════════════════
+function parseCSVFull(text){
+  text=text.replace(/^\uFEFF/,"");
+  var rows=[],cur="",inQ=false,row=[];
+  for(var i=0;i<text.length;i++){
+    var ch=text[i],nx=text[i+1];
+    if(ch==='"'){if(inQ&&nx==='"'){cur+='"';i++;}else{inQ=!inQ;}}
+    else if(ch===','&&!inQ){row.push(cur);cur="";}
+    else if((ch==='\r'||ch==='\n')&&!inQ){
+      if(ch==='\r'&&nx==='\n')i++;
+      row.push(cur);cur="";
+      if(row.some(function(v){return v!="";}))rows.push(row);
+      row=[];
+    }else{cur+=ch;}
+  }
+  if(cur||row.length){row.push(cur);if(row.some(function(v){return v!="";}))rows.push(row);}
+  return rows;
+}
+
+function buildColsRows(raw){
+  if(!raw.length)return{cols:[],rows:[]};
+  var seen={};
+  var cols=raw[0].map(function(c){
+    var cl=cleanVal(String(c));
+    if(seen[cl]){seen[cl]++;return cl+"_"+seen[cl];}
+    seen[cl]=1;return cl;
+  });
+  var rows=raw.slice(1).map(function(r){
+    var obj={};
+    cols.forEach(function(c,i){obj[c]=cleanVal((r[i]||"").replace(/[\r\n]+/g," "));});
+    return obj;
+  });
+  return{cols:cols,rows:rows};
+}
+
+function parseCSV(text){return buildColsRows(parseCSVFull(text));}
+
+// ══════════════════════════════════════════════════
+// ファイル読み込み
+// ══════════════════════════════════════════════════
+function readFile(file){
+  return new Promise(function(resolve,reject){
+    var isCSV=file.name.toLowerCase().endsWith(".csv");
+    var reader=new FileReader();
+    reader.onerror=function(){reject(new Error("読み込み失敗"));};
+    if(isCSV){
+      reader.onload=function(e){try{resolve(parseCSV(e.target.result));}catch(err){reject(err);}};
+      reader.readAsText(file,"Shift-JIS");
+    }else{
+      reader.onload=function(e){
+        var wb2=new ExcelJS.Workbook();
+        wb2.xlsx.load(e.target.result).then(function(){
+          try{
+            var ws=wb2.worksheets[0],aoa=[];
+            ws.eachRow({includeEmpty:false},function(row){
+              aoa.push(row.values.slice(1).map(function(v){
+                if(v===null||v===undefined)return"";
+                if(typeof v==="object"&&v.text)return v.text;
+                if(typeof v==="object"&&v.result!==undefined)return String(v.result);
+                return String(v);
+              }));
+            });
+            if(!aoa.length)throw new Error("シートが空");
+            resolve(buildColsRows(aoa));
+          }catch(err){reject(err);}
+        }).catch(reject);
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  });
+}
+
+function loadFile(f,which){
+  document.getElementById("name_"+which).textContent=f.name;
+  readFile(f).then(function(r){
+    if(which==="before"){dataBefore=r.rows;colsBefore=r.cols;}
+    else{dataAfter=r.rows;colsAfter=r.cols;}
+    setLog((which==="before"?"変更前":"変更後")+": "+r.rows.length+"行/"+r.cols.length+"列 読込完了");
+    checkReady();
+  }).catch(function(err){
+    setLog("❌ "+(which==="before"?"変更前":"変更後")+"エラー: "+err.message);
+    checkReady();
+  });
+}
+
+document.getElementById("f_before").addEventListener("change",function(e){if(e.target.files[0])loadFile(e.target.files[0],"before");});
+document.getElementById("f_after").addEventListener("change",function(e){if(e.target.files[0])loadFile(e.target.files[0],"after");});
+window.handleDrop=function(event,which){
+  event.preventDefault();
+  document.getElementById("drop_"+which).classList.remove("drag-over");
+  var f=event.dataTransfer.files[0];
+  if(f)loadFile(f,which);
+};
+
+// ══════════════════════════════════════════════════
+// デバッグ
+// ══════════════════════════════════════════════════
+window.debugInfo=function(){
+  var dbg=document.getElementById("dbg");dbg.style.display="block";
+  var out="";
+  if(dataBefore){
+    out+="=== 変更前 ("+dataBefore.length+"行) ===\n";
+    out+="カラム: "+colsBefore.map(function(c){return "["+c+"]";}).join(", ")+"\n";
+    out+="1行目: "+JSON.stringify(dataBefore[0])+"\n";
+  }
+  if(dataAfter){
+    out+="\n=== 変更後 ("+dataAfter.length+"行) ===\n";
+    out+="カラム: "+colsAfter.map(function(c){return "["+c+"]";}).join(", ")+"\n";
+    out+="1行目: "+JSON.stringify(dataAfter[0])+"\n";
+  }
+  if(dataBefore&&dataAfter){
+    var miss=MATCH_KEY_COLS.filter(function(c){return !colsBefore.includes(c)||!colsAfter.includes(c);});
+    out+=miss.length?"⚠ キー未検出: "+miss.join(", ")+"\n":"✅ 突合キー正常\n";
+    var res=compare(dataBefore,dataAfter,colsAfter);
+    out+="比較結果: 一致"+res.matched.length
+      +" 削除"+res.changed.filter(function(c){return c.type==="gray";}).length
+      +" 追加"+res.changed.filter(function(c){return c.type==="red";}).length
+      +" 変更"+res.changed.filter(function(c){return c.type==="diff";}).length+"\n";
+    out+="\n変更行の順序:\n";
+    res.changed.forEach(function(c,i){
+      out+="  "+(i+1)+". type="+c.type+" No="+c.row[IGNORE_COL]+" ai="+(c.ai===Infinity?"∞":c.ai)+"\n";
+    });
+  }
+  dbg.textContent=out;
+};
+
+// ══════════════════════════════════════════════════
+// 比較ロジック
+// ══════════════════════════════════════════════════
+function makeMatchKey(row){
+  return MATCH_KEY_COLS.map(function(c){return String(row[c]||"");}).join("§");
+}
+
+function rowsMatch(rb,ra,cols){
+  return cols.every(function(c){return String(rb[c]||"")===String(ra[c]||"");});
+}
+
+function compare(before,after,colsA){
+  var cmpCols=colsA.filter(function(c,i){return c!==IGNORE_COL&&i!==SKIP_COMPARE_IDX;});
+  var matched=[],changed=[];
+
+  // ① 完全一致チェック
+  var usedBefore=new Set(),usedAfter=new Set();
+  before.forEach(function(rb,bi){
+    for(var ai=0;ai<after.length;ai++){
+      if(usedAfter.has(ai))continue;
+      if(rowsMatch(rb,after[ai],cmpCols)){
+        matched.push(after[ai]);
+        usedBefore.add(bi);
+        usedAfter.add(ai);
+        return;
+      }
+    }
+  });
+
+  var remBefore=[],remAfter=[];
+  before.forEach(function(rb,bi){if(!usedBefore.has(bi))remBefore.push({row:rb,bi:bi});});
+  after.forEach(function(ra,ai){if(!usedAfter.has(ai))remAfter.push({row:ra,ai:ai});});
+
+  // ② LCS（検査項目＋AI検査方法キー）
+  var B=remBefore.length,A=remAfter.length;
+  var dp=[];
+  for(var i=0;i<=B;i++){
+    dp[i]=[];
+    for(var j=0;j<=A;j++)dp[i][j]=0;
+  }
+  for(var i=1;i<=B;i++){
+    for(var j=1;j<=A;j++){
+      if(makeMatchKey(remBefore[i-1].row)===makeMatchKey(remAfter[j-1].row)){
+        dp[i][j]=dp[i-1][j-1]+1;
+      }else{
+        dp[i][j]=dp[i-1][j]>=dp[i][j-1]?dp[i-1][j]:dp[i][j-1];
+      }
+    }
+  }
+  var pairs=[];
+  var ti=B,tj=A;
+  while(ti>0&&tj>0){
+    if(makeMatchKey(remBefore[ti-1].row)===makeMatchKey(remAfter[tj-1].row)){
+      pairs.unshift({bi:ti-1,ai:tj-1});
+      ti--;tj--;
+    }else if(dp[ti-1][tj]>=dp[ti][tj-1]){
+      ti--;
+    }else{
+      tj--;
+    }
+  }
+
+  var matchedB=new Set(),matchedA=new Set();
+  pairs.forEach(function(p){
+    matchedB.add(p.bi);
+    matchedA.add(p.ai);
+    var rb=remBefore[p.bi].row;
+    var aItem=remAfter[p.ai];
+    var cellColors={};
+    cmpCols.forEach(function(c){
+      if(String(rb[c]||"")!==String(aItem.row[c]||""))
+        cellColors[c]=KEY_COLS.includes(c)?"red":"yellow";
+    });
+    if(Object.keys(cellColors).length===0){
+      matched.push(aItem.row);
+    }else{
+      changed.push({row:aItem.row,cellColors:cellColors,rowBefore:rb,type:"diff",ai:aItem.ai});
+    }
+  });
+
+  // LCS未対応 → グレー（削除）or 赤（追加）
+  remBefore.forEach(function(item,idx){
+    if(!matchedB.has(idx)){
+      var aligned={};
+      colsA.forEach(function(c){aligned[c]=item.row[c]||"";});
+      changed.push({row:aligned,cellColors:null,rowBefore:null,type:"gray",ai:Infinity});
+    }
+  });
+  remAfter.forEach(function(item,idx){
+    if(!matchedA.has(idx)){
+      changed.push({row:item.row,cellColors:null,rowBefore:null,type:"red",ai:item.ai});
+    }
+  });
+
+  // ③ グレー行と赤行をNo列で後処理マージ
+  var grayItems=[],redItems=[],otherItems=[];
+  changed.forEach(function(item){
+    if(item.type==="gray")     grayItems.push(item);
+    else if(item.type==="red") redItems.push(item);
+    else                        otherItems.push(item);
+  });
+
+  var mergedChanged=[];
+  var usedGray=new Set(),usedRed=new Set();
+
+  grayItems.forEach(function(gItem,gi){
+    var gNo=toNum(gItem.row[IGNORE_COL]);
+    var pairIdx=-1;
+    for(var i=0;i<redItems.length;i++){
+      if(usedRed.has(i))continue;
+      if(toNum(redItems[i].row[IGNORE_COL])===gNo){pairIdx=i;break;}
+    }
+    if(pairIdx===-1)return; // 対応赤行なし → ペアリングしない
+
+    var rItem=redItems[pairIdx];
+    var rb=gItem.row,ra=rItem.row;
+    var cellColors={};
+    cmpCols.forEach(function(c){
+      if(String(rb[c]||"")!==String(ra[c]||""))
+        cellColors[c]=KEY_COLS.includes(c)?"red":"yellow";
+    });
+    if(Object.keys(cellColors).length===0){
+      matched.push(ra);
+    }else{
+      mergedChanged.push({row:ra,cellColors:cellColors,rowBefore:rb,type:"diff",ai:rItem.ai});
+    }
+    usedGray.add(gi);
+    usedRed.add(pairIdx);
+  });
+
+  // ペアリングできなかったグレー行 → 本当の削除行
+  grayItems.forEach(function(gItem,gi){
+    if(!usedGray.has(gi))mergedChanged.push(gItem);
+  });
+
+  // ペアリングできなかった赤行 → 本当の新規追加行（cellColorsをnullに強制）
+  redItems.forEach(function(rItem,i){
+    if(!usedRed.has(i)){
+      mergedChanged.push({row:rItem.row,cellColors:null,rowBefore:null,type:"red",ai:rItem.ai});
+    }
+  });
+
+  // diff行も追加
+  otherItems.forEach(function(item){mergedChanged.push(item);});
+
+  changed=mergedChanged;
+
+  // No列で数値ソート（削除行は末尾）
+  changed.sort(function(a,b){
+    var ag=(a.ai===Infinity),bg=(b.ai===Infinity);
+    if(ag&&bg)return 0;
+    if(ag)return 1;
+    if(bg)return -1;
+    var na=toNum(a.row[IGNORE_COL]);
+    var nb=toNum(b.row[IGNORE_COL]);
+    if(na!==nb)return na-nb;
+    return a.ai-b.ai;
+  });
+
+  return{matched:matched,changed:changed};
+}
+
+// ══════════════════════════════════════════════════
+// Excel 出力
+// ══════════════════════════════════════════════════
+function fillCell(cell,argb){
+  cell.fill={type:"pattern",pattern:"solid",fgColor:{argb:argb}};
+}
+
+function writeSheet(wb,name,cols,rows,colorFn){
+  var ws=wb.addWorksheet(name);
+  cols.forEach(function(c,ci){
+    var cell=ws.getCell(1,ci+1);
+    cell.value=c;
+    cell.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF4472C4"}};
+    cell.font={bold:true,color:{argb:"FFFFFFFF"},size:9,name:FONT_NAME};
+  });
+  rows.forEach(function(rowData,ri){
+    cols.forEach(function(col,ci){
+      var cell=ws.getCell(ri+2,ci+1);
+      cell.value=String(rowData[col]||"");
+      cell.font={size:9,name:FONT_NAME};
+      if(colorFn){var argb=colorFn(rowData,col,ci,ri);if(argb)fillCell(cell,argb);}
+    });
+  });
+  cols.forEach(function(col,ci){
+    ws.getColumn(ci+1).width=getColWidth(ci,col,rows);
+  });
+}
+
+window.run=function(){
+  setLog("比較処理中...");
+  setTimeout(function(){
+    try{
+      var res=compare(dataBefore,dataAfter,colsAfter);
+      var matched=res.matched,changed=res.changed;
+      var wb=new ExcelJS.Workbook();
+
+      writeSheet(wb,"変更前",  colsBefore,dataBefore,null);
+      writeSheet(wb,"変更後",  colsAfter, dataAfter, null);
+      writeSheet(wb,"一致項目",colsAfter, matched,   null);
+
+      // 変更内容シート
+      var ws4=wb.addWorksheet("変更内容");
+      var nChanged=changed.length;
+
+      // ヘッダ
+      colsAfter.forEach(function(c,ci){
+        var cell=ws4.getCell(1,ci+1);
+        cell.value=c;
+        cell.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF4472C4"}};
+        cell.font={bold:true,color:{argb:"FFFFFFFF"},size:9,name:FONT_NAME};
+      });
+
+      // データ行
+      changed.forEach(function(item,ri){
+        colsAfter.forEach(function(col,ci){
+          var cell=ws4.getCell(ri+2,ci+1);
+          cell.value=String(item.row[col]||"");
+          cell.font={size:9,name:FONT_NAME};
+          var argb=null;
+          if(item.type==="gray"){
+            argb="FFCCCCCC";
+          }else if(item.type==="red"){
+            argb="FFFF9999";
+          }else if(item.type==="diff"){
+            if(item.cellColors&&item.cellColors[col])
+              argb=item.cellColors[col]==="red"?"FFFF9999":"FFFFFF99";
+          }
+          if(argb)fillCell(cell,argb);
+          if(item.type==="diff"&&item.cellColors&&item.cellColors[col]&&item.rowBefore){
+            var bv=String(item.rowBefore[col]||"");
+            if(bv!==""){
+              cell.note={texts:[
+                {font:{bold:true,size:9,name:FONT_NAME},text:"変更前:\n"},
+                {font:{size:9,name:FONT_NAME},text:bv}
+              ]};
+            }
+          }
+        });
+      });
+
+      // 凡例
+      var legDefs=[
+        {text:"【凡例】",                          argb:null},
+        {text:"ｸﾞﾚｰ(行全体)：削除項目",            argb:"FFCCCCCC"},
+        {text:"赤(行全体)　：新規追加項目",          argb:"FFFF9999"},
+        {text:"赤(ｾﾙ)　　　：変更項目(検査項目･規格)",argb:"FFFF9999"},
+        {text:"黄(ｾﾙ)　　　：変更項目(その他)",      argb:"FFFFFF99"},
+      ];
+      var legStart=nChanged+2;
+      legDefs.forEach(function(leg,li){
+        var rowNum=legStart+li;
+        ws4.mergeCells(rowNum,1,rowNum,7);
+        var cell=ws4.getCell(rowNum,1);
+        cell.value=leg.text;
+        cell.font={size:9,name:FONT_NAME,bold:li===0};
+        if(leg.argb){for(var ci2=1;ci2<=7;ci2++)fillCell(ws4.getCell(rowNum,ci2),leg.argb);}
+      });
+
+      // 列幅
+      colsAfter.forEach(function(col,ci){
+        ws4.getColumn(ci+1).width=getColWidth(ci,col,changed.map(function(item){return item.row;}));
+      });
+
+      wb.views=[{activeTab:3}];
+
+      wb.xlsx.writeBuffer().then(function(buf){
+        var now=new Date();
+        var ts=now.getFullYear()
+          +("0"+(now.getMonth()+1)).slice(-2)
+          +("0"+now.getDate()).slice(-2)+"_"
+          +("0"+now.getHours()).slice(-2)
+          +("0"+now.getMinutes()).slice(-2)
+          +("0"+now.getSeconds()).slice(-2);
+        var blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+        var a=document.createElement("a");
+        a.href=URL.createObjectURL(blob);
+        a.download="検査規格比較結果_"+ts+".xlsx";
+        a.click();
+        var nDel=changed.filter(function(c){return c.type==="gray";}).length;
+        var nAdd=changed.filter(function(c){return c.type==="red";}).length;
+        var nMod=changed.filter(function(c){return c.type==="diff";}).length;
+        setLog("✅ 完了 ／ 一致:"+matched.length+"行　削除:"+nDel+"行　追加:"+nAdd+"行　変更:"+nMod+"行");
+      }).catch(function(err){setLog("❌ 出力エラー: "+err.message);console.error(err);});
+
+    }catch(err){setLog("❌ エラー: "+err.message);console.error(err);}
+  },50);
+};
+
+window._compare    =compare;
+window._dataBefore =function(){return dataBefore;};
+window._dataAfter  =function(){return dataAfter;};
+window._colsAfter  =function(){return colsAfter;};
+
+})();
+</script>
+</body>
+</html>
